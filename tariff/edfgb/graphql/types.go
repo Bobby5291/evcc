@@ -31,8 +31,8 @@ type getApplicableRates struct {
 
 // ApplicableRate is a single rate period returned by the applicableRates query.
 type ApplicableRate struct {
-	ValidFrom                time.Time
-	ValidTo                  time.Time
-	GrossUnitRateCentsPerKwh string
-	NetUnitRateCentsPerKwh   string
+	ValidFrom                          time.Time
+	ValidTo                            time.Time
+	VatInclusiveUnitRateInPenniesPerKwh string `graphql:"vatInclusiveUnitRateInPenniesPerKwh"`
+	UnitRateInPenniesPerKwh             string `graphql:"unitRateInPenniesPerKwh"`
 }

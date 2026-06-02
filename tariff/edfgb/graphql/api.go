@@ -86,8 +86,9 @@ func (c *EdfGbGraphQLClient) Rates(mpan string, startAt, endAt time.Time) ([]App
 	if err := c.Client.Query(ctx, &q, map[string]any{
 		"accountNumber": c.accountNumber,
 		"mpxn":          mpan,
-		"startAt":       startAt,
-		"endAt":         endAt,
+		// DateTime scalars must be ISO-8601 strings, not time.Time
+		"startAt": startAt.UTC().Format("2006-01-02T15:04:05Z"),
+		"endAt":   endAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}); err != nil {
 		return nil, err
 	}

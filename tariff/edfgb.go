@@ -115,16 +115,20 @@ func (t *EdfGb) run(done chan error) {
 
 		data := make(api.Rates, 0, len(rawRates))
 		for _, r := range rawRates {
-			grossRate, err := strconv.ParseFloat(r.GrossUnitRateCentsPerKwh, 64)
+			rateStr := r.VatInclusiveUnitRateInPenniesPerKwh
+			if rateStr == "" {
+				rateStr = r.UnitRateInPenniesPerKwh
+			}
+			rate, err := strconv.ParseFloat(rateStr, 64)
 			if err != nil {
-				t.log.WARN.Printf("failed to parse rate %q: %v", r.GrossUnitRateCentsPerKwh, err)
+				t.log.WARN.Printf("failed to parse rate %q: %v", rateStr, err)
 				continue
 			}
 			data = append(data, api.Rate{
 				Start: r.ValidFrom,
 				End:   r.ValidTo,
 				// Rates are in pence/kWh; divide by 100 to get £/kWh
-				Value: grossRate / 100,
+				Value: rate / 100,
 			})
 		}
 
