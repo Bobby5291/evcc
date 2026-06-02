@@ -1,4 +1,4 @@
-package tariff
+ackage tariff
 
 import (
 	"errors"
