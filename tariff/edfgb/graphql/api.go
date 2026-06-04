@@ -2,7 +2,10 @@ package graphql
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -13,13 +16,16 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// BaseURI is EDF UK's Kraken API root.
-const BaseURI = "https://api.edfgb-kraken.energy/v1/graphql/"
+const (
+	BaseURI    = "https://api.edfgb-kraken.energy/v1/graphql/"
+	RestBaseURI = "https://api.edfgb-kraken.energy/v1"
+)
 
 // EdfGbGraphQLClient communicates with EDF UK's Kraken platform.
 type EdfGbGraphQLClient struct {
 	log           *util.Logger
 	*graphql.Client
+	httpClient    *http.Client
 	accountNumber string
 }
 
@@ -48,54 +54,100 @@ func NewClient(log *util.Logger, email, password, accountNumber string) (*EdfGbG
 	gq := &EdfGbGraphQLClient{
 		log:           log,
 		accountNumber: accountNumber,
+		httpClient:    cli,
 		Client:        graphql.NewClient(BaseURI, cli),
 	}
 
 	return gq, nil
 }
 
-// MPAN fetches the electricity meter point reference number for this account.
-func (c *EdfGbGraphQLClient) MPAN() (string, error) {
+// ElectricityInfo fetches the active electricity agreement info (MPAN, product code, tariff code).
+func (c *EdfGbGraphQLClient) ElectricityInfo() (ElectricityInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 
-	var q getMeterPoint
+	var q getElectricityInfo
 	if err := c.Client.Query(ctx, &q, map[string]any{
 		"accountNumber": c.accountNumber,
 	}); err != nil {
-		return "", err
+		return ElectricityInfo{}, err
 	}
 
-	for _, prop := range q.Account.Properties {
-		for _, mp := range prop.ElectricityMeterPoints {
-			if mp.Mpan != "" {
-				return mp.Mpan, nil
+	for _, agr := range q.Account.ElectricityAgreements {
+		mp := agr.MeterPoint
+		if mp.Mpan == "" {
+			continue
+		}
+		for _, a := range mp.Agreements {
+			// Try each inline fragment type for the tariff codes.
+			codes := []TariffCodes{a.Tariff.T1, a.Tariff.T2, a.Tariff.T3, a.Tariff.T4}
+			for _, tc := range codes {
+				if tc.ProductCode != "" && tc.TariffCode != "" {
+					return ElectricityInfo{
+						Mpan:        mp.Mpan,
+						ProductCode: tc.ProductCode,
+						TariffCode:  tc.TariffCode,
+					}, nil
+				}
 			}
 		}
 	}
 
-	return "", errors.New("no electricity meter point found")
+	return ElectricityInfo{}, errors.New("no active electricity agreement with tariff codes found")
 }
 
-// Rates fetches applicable rates for the given MPAN and time window.
-func (c *EdfGbGraphQLClient) Rates(mpan string, startAt, endAt time.Time) ([]ApplicableRate, error) {
+// UnitRates fetches standard unit rates from the REST API for the given time window.
+func (c *EdfGbGraphQLClient) UnitRates(productCode, tariffCode string, from, to time.Time) ([]UnitRate, error) {
+	url := fmt.Sprintf(
+		"%s/products/%s/electricity-tariffs/%s/standard-unit-rates/?period_from=%s&period_to=%s",
+		RestBaseURI,
+		productCode,
+		tariffCode,
+		from.UTC().Format(time.RFC3339),
+		to.UTC().Format(time.RFC3339),
+	)
+
+	var all []UnitRate
+	for url != "" {
+		rates, next, err := c.fetchRatePage(url)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, rates...)
+		url = next
+	}
+	return all, nil
+}
+
+func (c *EdfGbGraphQLClient) fetchRatePage(url string) ([]UnitRate, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 
-	var q getApplicableRates
-	if err := c.Client.Query(ctx, &q, map[string]any{
-		"accountNumber": c.accountNumber,
-		"mpxn":          mpan,
-		// DateTime scalars must be ISO-8601 strings
-		"startAt": startAt.UTC().Format("2006-01-02T15:04:05Z"),
-		"endAt":   endAt.UTC().Format("2006-01-02T15:04:05Z"),
-	}); err != nil {
-		return nil, err
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("rate API returned %d", resp.StatusCode)
 	}
 
-	rates := make([]ApplicableRate, 0, len(q.ApplicableRates.Edges))
-	for _, edge := range q.ApplicableRates.Edges {
-		rates = append(rates, edge.Node)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
 	}
-	return rates, nil
+
+	var result UnitRatesResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, "", err
+	}
+
+	return result.Results, result.Next, nil
 }

@@ -9,29 +9,49 @@ type krakenTokenAuthentication struct {
 	} `graphql:"obtainKrakenToken(input: {email: $email, password: $password})"`
 }
 
-// getMeterPoint fetches the MPAN (meter point reference) for the account.
-type getMeterPoint struct {
+// getElectricityInfo fetches the active electricity agreement, MPAN and tariff codes.
+type getElectricityInfo struct {
 	Account struct {
-		Properties []struct {
-			ElectricityMeterPoints []struct {
-				Mpan string
+		ElectricityAgreements []struct {
+			MeterPoint struct {
+				Mpan       string
+				Agreements []struct {
+					ValidFrom time.Time
+					ValidTo   time.Time
+					Tariff    struct {
+						T1 TariffCodes `graphql:"... on TariffType"`
+						T2 TariffCodes `graphql:"... on HalfHourlyTariff"`
+						T3 TariffCodes `graphql:"... on DayNightTariff"`
+						T4 TariffCodes `graphql:"... on FourRateEvTariff"`
+					}
+				} `graphql:"agreements(includeInactive: false)"`
 			}
-		}
+		} `graphql:"electricityAgreements(active: true)"`
 	} `graphql:"account(accountNumber: $accountNumber)"`
 }
 
-// getApplicableRates fetches time-bounded rate data for a given meter point.
-type getApplicableRates struct {
-	ApplicableRates struct {
-		Edges []struct {
-			Node ApplicableRate
-		}
-	} `graphql:"applicableRates(accountNumber: $accountNumber, mpxn: $mpxn, startAt: $startAt, endAt: $endAt)"`
+// TariffCodes holds the product and tariff code for a rate lookup.
+type TariffCodes struct {
+	ProductCode string
+	TariffCode  string
 }
 
-// ApplicableRate is a single rate period returned by the applicableRates query.
-// Only dates are requested to confirm query structure; rate fields to be added once confirmed.
-type ApplicableRate struct {
-	ValidFrom time.Time
-	ValidTo   time.Time
+// ElectricityInfo is the resolved meter point and tariff details.
+type ElectricityInfo struct {
+	Mpan        string
+	ProductCode string
+	TariffCode  string
+}
+
+// UnitRate is a single rate period from the REST API.
+type UnitRate struct {
+	ValueIncVat float64 `json:"value_inc_vat"`
+	ValidFrom   string  `json:"valid_from"`
+	ValidTo     string  `json:"valid_to"`
+}
+
+// UnitRatesResponse is the paginated REST response.
+type UnitRatesResponse struct {
+	Results []UnitRate `json:"results"`
+	Next    string     `json:"next"`
 }

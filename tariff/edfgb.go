@@ -72,11 +72,11 @@ func buildEdfGbFromConfig(other map[string]any) (*EdfGb, error) {
 func (t *EdfGb) run(done chan error) {
 	var once sync.Once
 
-	// Discover MPAN once at startup.
-	var mpan string
+	// Discover tariff info (MPAN, product code, tariff code) once at startup.
+	var info edfGbGql.ElectricityInfo
 	if err := backoff.Retry(func() error {
 		var err error
-		mpan, err = t.gqlClient.MPAN()
+		info, err = t.gqlClient.ElectricityInfo()
 		if err != nil {
 			if errors.Is(err, edfGbGql.ErrAuthFailed) {
 				return backoff.Permanent(err)
@@ -85,22 +85,22 @@ func (t *EdfGb) run(done chan error) {
 		}
 		return nil
 	}, bo()); err != nil {
-		once.Do(func() { done <- fmt.Errorf("failed to discover MPAN: %w", err) })
+		once.Do(func() { done <- fmt.Errorf("failed to discover electricity info: %w", err) })
 		return
 	}
 
-	t.log.DEBUG.Printf("discovered MPAN: %s", mpan)
+	t.log.DEBUG.Printf("MPAN: %s, product: %s, tariff: %s", info.Mpan, info.ProductCode, info.TariffCode)
 
 	for tick := time.Tick(time.Hour); ; <-tick {
 		now := time.Now()
-		startAt := now
-		endAt := now.AddDate(0, 0, planDays)
+		from := now
+		to := now.AddDate(0, 0, planDays)
 
-		var rawRates []edfGbGql.ApplicableRate
+		var rawRates []edfGbGql.UnitRate
 
 		if err := backoff.Retry(func() error {
 			var err error
-			rawRates, err = t.gqlClient.Rates(mpan, startAt, endAt)
+			rawRates, err = t.gqlClient.UnitRates(info.ProductCode, info.TariffCode, from, to)
 			if err != nil {
 				if errors.Is(err, edfGbGql.ErrAuthFailed) {
 					return backoff.Permanent(err)
@@ -116,13 +116,28 @@ func (t *EdfGb) run(done chan error) {
 
 		t.log.DEBUG.Printf("fetched %d rate periods", len(rawRates))
 
-		// Rate values are placeholders until field names are confirmed.
 		data := make(api.Rates, 0, len(rawRates))
 		for _, r := range rawRates {
+			validFrom, err := time.Parse(time.RFC3339, r.ValidFrom)
+			if err != nil {
+				t.log.WARN.Printf("failed to parse valid_from %q: %v", r.ValidFrom, err)
+				continue
+			}
+			var validTo time.Time
+			if r.ValidTo != "" {
+				validTo, err = time.Parse(time.RFC3339, r.ValidTo)
+				if err != nil {
+					t.log.WARN.Printf("failed to parse valid_to %q: %v", r.ValidTo, err)
+					continue
+				}
+			} else {
+				validTo = to
+			}
 			data = append(data, api.Rate{
-				Start: r.ValidFrom,
-				End:   r.ValidTo,
-				Value: 0,
+				Start: validFrom,
+				End:   validTo,
+				// value_inc_vat is in pence/kWh; divide by 100 to get £/kWh
+				Value: r.ValueIncVat / 100,
 			})
 		}
 
